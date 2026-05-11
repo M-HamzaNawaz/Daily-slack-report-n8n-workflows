@@ -1,0 +1,632 @@
+{
+  "name": "Slack daily report",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "weeks",
+              "triggerAtDay": [
+                5,
+                3,
+                4,
+                2,
+                6
+              ],
+              "triggerAtHour": 6
+            }
+          ]
+        }
+      },
+      "id": "71a6f3a7-4be0-409c-a30d-15d7e63cb519",
+      "name": "Daily Report Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -848,
+        48
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const userMessages = {};\n\n// ================= CONFIG =================\nconst runTime = new Date();\nconst windowHours = 24;\nconst windowStart = new Date(runTime.getTime() - windowHours * 60 * 60 * 1000);\n\nconst options = { timeZone: 'Asia/Karachi', hour12: false };\n\nconst formatPKTime = (ts) =>\n  ts ? new Date(ts).toLocaleString('en-GB', options) : null;\n\nconst formatDuration = (ms) => {\n  if (!ms || ms <= 0) return '0h 0m';\n  const totalMinutes = Math.floor(ms / 60000);\n  const hours = Math.floor(totalMinutes / 60);\n  const minutes = totalMinutes % 60;\n  return `${hours}h ${minutes}m`;\n};\n\n// ================= COLLECT MESSAGES =================\nfor (const item of $input.all()) {\n  const userId = item.json.user;\n\n  const rawText = (item.json.text || '');\n  const text = rawText.toLowerCase().trim().replace(/\\s+/g, ' ');\n\n  const timestamp = Math.floor(Number(item.json.ts) * 1000);\n  const msgTime = new Date(timestamp);\n\n  if (msgTime > runTime) continue;\n\n  if (!userMessages[userId]) userMessages[userId] = [];\n\n  userMessages[userId].push({\n    text,\n    timestamp: msgTime.getTime()\n  });\n}\n\n// ================= PROCESS USERS =================\nconst output = [];\n\nfor (const userId in userMessages) {\n\n  const messages = userMessages[userId];\n  messages.sort((a, b) => a.timestamp - b.timestamp);\n\n  let checkIn = null;\n  let checkOut = null;\n\n  let currentStepOut = null;\n  const stepPairs = [];\n\n  const allMessages = [];\n\n  for (const msg of messages) {\n\n    const text = msg.text;\n\n    const isCheckIn = /^check[- ]?in$/.test(text);\n    const isCheckOut = /^check[- ]?out$/.test(text);\n    const isStepOut = /^step[- ]?out$/.test(text);\n    const isStepIn = /^step[- ]?in$/.test(text);\n\n    let type = 'unknown';\n    if (isCheckIn) type = 'check in';\n    else if (isCheckOut) type = 'check out';\n    else if (isStepOut) type = 'step out';\n    else if (isStepIn) type = 'step in';\n\n    allMessages.push({\n      type,\n      text,\n      timestamp: formatPKTime(msg.timestamp)\n    });\n\n    // ===== CHECK-IN / CHECK-OUT =====\n    if (isCheckIn && !checkIn) {\n      checkIn = msg.timestamp;\n    }\n\n    if (isCheckOut) {\n      checkOut = msg.timestamp;\n    }\n\n    // ===== BREAK TRACKING =====\n\n    // Step Out\n    if (isStepOut) {\n      // agar already step-out hai (duplicate), ignore karo\n      if (!currentStepOut) {\n        currentStepOut = msg.timestamp;\n      }\n    }\n\n    // Step In\n    if (isStepIn) {\n      if (currentStepOut) {\n        // valid pair\n        stepPairs.push({\n          stepOut: currentStepOut,\n          stepIn: msg.timestamp\n        });\n        currentStepOut = null;\n      }\n      // agar step-in bina step-out ke aaye → ignore\n    }\n  }\n\n  // ================= BREAK CALCULATION =================\n  let totalBreak = 0;\n\n  // normal pairs\n  for (const p of stepPairs) {\n    totalBreak += (p.stepIn - p.stepOut);\n  }\n\n  // 🔥 MISSING STEP-IN FIX\n  if (currentStepOut) {\n    const ONE_HOUR = 60 * 60 * 1000;\n    totalBreak += ONE_HOUR;\n  }\n\n  // ================= WORKING HOURS =================\n  let workingFormatted = 'N/A';\n\n  if (checkIn) {\n    const effectiveOut =\n      checkOut || messages[messages.length - 1].timestamp;\n\n    let working = (effectiveOut - checkIn) - totalBreak;\n\n    // safety (negative avoid)\n    if (working < 0) working = 0;\n\n    workingFormatted = formatDuration(working);\n  }\n\n  // ================= STATUS =================\n  let status = 'Absent';\n\n  if (checkIn && checkOut) {\n    status = 'Complete';\n  } else if (checkIn && !checkOut) {\n    status = 'Missing Check-out';\n  } else if (!checkIn && checkOut) {\n    status = 'Missing Check-in';\n  }\n\n  // ================= OUTPUT =================\n  output.push({\n    json: {\n      userId,\n      date: new Date(windowStart).toLocaleDateString('en-GB', options),\n      windowStart: formatPKTime(windowStart),\n      windowEnd: formatPKTime(runTime),\n\n      checkInTime: formatPKTime(checkIn),\n      checkOutTime: formatPKTime(checkOut),\n\n      totalWorkingHours: workingFormatted,\n      totalBreakDuration: formatDuration(totalBreak),\n\n      status,\n      totalMessages: messages.length,\n      allMessages\n    }\n  });\n}\n\nreturn output;"
+      },
+      "id": "e779b2bc-c400-4ffc-b907-85eede89897d",
+      "name": "Group Messages by User",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        752,
+        48
+      ]
+    },
+    {
+      "parameters": {
+        "options": {
+          "fileName": "=daily-report.csv",
+          "headerRow": true
+        }
+      },
+      "id": "6c47f4de-f4e0-42d7-a1ed-5edc278f2124",
+      "name": "Convert to CSV",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        2384,
+        48
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "file",
+        "options": {
+          "channelId": "C0ASZUWGEMP",
+          "initialComment": "=📊 Attendance Report\nTotal Records: {{ $json.totalRecords }}\nLate Check-ins: {{ $json.lateCheckIns }}\nOn-time Rate: {{ $json.onTimePercentage }}%"
+        }
+      },
+      "id": "da573c78-94a4-4121-bd85-6450d081f2d8",
+      "name": "Send Report to Slack",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.4,
+      "position": [
+        2864,
+        48
+      ],
+      "webhookId": "ae048fdb-bd4c-45c7-9927-9f891a5f6501",
+      "executeOnce": true,
+      "credentials": {
+        "slackApi": {
+          "id": "s4HKv8JbSd8O2TKx",
+          "name": "Slack Api"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "channel",
+        "operation": "history",
+        "channelId": {
+          "__rl": true,
+          "value": "C076J8RCBK4",
+          "mode": "list",
+          "cachedResultName": "daily-standup"
+        },
+        "returnAll": true,
+        "filters": {
+          "inclusive": true,
+          "latest": "={{ $now}}",
+          "oldest": "={{ $now.minus({hours:24}) }}"
+        }
+      },
+      "id": "6e9bd250-5daf-497c-ab8a-e1798881d348",
+      "name": "Fetch Daily Messages",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.4,
+      "position": [
+        -400,
+        48
+      ],
+      "webhookId": "8a206001-1b0c-4193-adc5-3be3640df4da",
+      "credentials": {
+        "slackApi": {
+          "id": "s4HKv8JbSd8O2TKx",
+          "name": "Slack Api"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "id-1",
+              "name": "reportType",
+              "value": "daily",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "2cd71685-f84e-4f5b-8e24-18f1a2eae289",
+      "name": "Mark as Daily Report",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -624,
+        48
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const allItems = $input.all();\n\nconst totalRecords = allItems.length;\n\nconst lateCheckIns = allItems.filter(i => i.json.Status === 'Late').length;\nconst onTimeCount = allItems.filter(i => i.json.Status === 'On Time').length;\n// const missingCheckIns = allItems.filter(i => i.json.Status === 'No check-in').length;\n// const missingCheckOuts = allItems.filter(i => i.json['Check-Out'] === '-' || !i.json['Check-Out']).length;\n\nconst onTimePercentage = totalRecords > 0 \n  ? Math.round((onTimeCount / totalRecords) * 100) \n  : 0;\n\nreturn [{\n  json: {\n    totalRecords,\n    lateCheckIns,\n    onTimePercentage,\n    data: allItems.map(item => item.json)\n  }\n}];"
+      },
+      "id": "bc0d6348-d8b8-493b-98cd-b4f01216b3d9",
+      "name": "Calculate Summary Statistics",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1920,
+        48
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "id-1",
+              "name": "totalRecords",
+              "value": "={{ $('Calculate Summary Statistics').item.json.totalRecords }}",
+              "type": "number"
+            },
+            {
+              "id": "id-2",
+              "name": "lateCheckIns",
+              "value": "={{ $('Calculate Summary Statistics').item.json.lateCheckIns }}",
+              "type": "number"
+            },
+            {
+              "id": "id-4",
+              "name": "onTimePercentage",
+              "value": "={{ $('Calculate Summary Statistics').item.json.onTimePercentage }}",
+              "type": "number"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "665ee2f0-c677-4673-a903-03132994f7a4",
+      "name": "Add Summary to CSV",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2608,
+        48
+      ]
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "data",
+        "options": {}
+      },
+      "id": "f1f193b2-a9de-4f2f-a42d-486e910e5392",
+      "name": "Split Data for CSV",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        2144,
+        48
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "user",
+        "user": {
+          "__rl": true,
+          "value": "={{ $json.member }}",
+          "mode": "id"
+        }
+      },
+      "id": "7615f556-c797-425a-b177-cda3794f5a40",
+      "name": "Get User Info",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.4,
+      "position": [
+        1200,
+        48
+      ],
+      "webhookId": "010aa5fb-47f7-413d-9a29-2ccad9d8d41b",
+      "credentials": {
+        "slackApi": {
+          "id": "s4HKv8JbSd8O2TKx",
+          "name": "Slack Api"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// Reference words\nconst checkInRef = \"check in\";\nconst checkOutRef = \"check out\";\nconst stepOutRef = \"step out\";\nconst stepInRef = \"step in\";\n\n// Levenshtein similarity function\nfunction similarity(a, b) {\n    const m = a.length, n = b.length;\n    const dp = Array.from({length: m+1}, () => Array(n+1).fill(0));\n\n    for (let i = 0; i <= m; i++) dp[i][0] = i;\n    for (let j = 0; j <= n; j++) dp[0][j] = j;\n\n    for (let i = 1; i <= m; i++) {\n        for (let j = 1; j <= n; j++) {\n            dp[i][j] = Math.min(\n                dp[i - 1][j] + 1,\n                dp[i][j - 1] + 1,\n                dp[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)\n            );\n        }\n    }\n    return 1 - dp[m][n] / Math.max(m, n);\n}\n\n// Regex for common cases\nconst checkInRegex = /check[- ]?in|checked[- ]?in|checkin/i;\nconst checkOutRegex = /check[- ]?out|checked[- ]?out|checkout/i;\nconst stepOutRegex = /step[- ]?out|stepped[- ]?out|stepout/i;\nconst stepInRegex = /step[- ]?in|stepped[- ]?in|stepin/i;\n\n// Fuzzy threshold\nconst threshold = 0.7;\n\n// Process the input dynamically\nconst results = [];\n\nfor (const item of $input.all()) {\n    if (!item.json || !item.json.text) continue; // skip if no text\n\n    const originalText = item.json.text;\n    const textNormalized = originalText.toLowerCase().replace(/[^a-z ]/g, '');\n\n    if (checkInRegex.test(textNormalized) || similarity(textNormalized, checkInRef) >= threshold) {\n        results.push({ ...item, json: { ...item.json, text: \"check in\" } });\n    } else if (checkOutRegex.test(textNormalized) || similarity(textNormalized, checkOutRef) >= threshold) {\n        results.push({ ...item, json: { ...item.json, text: \"check out\" } });\n    } else if (stepOutRegex.test(textNormalized) || similarity(textNormalized, stepOutRef) >= threshold) {\n        results.push({ ...item, json: { ...item.json, text: \"step out\" } });\n    } else if (stepInRegex.test(textNormalized) || similarity(textNormalized, stepInRef) >= threshold) {\n        results.push({ ...item, json: { ...item.json, text: \"step in\" } });\n    }\n    // else ignore completely\n}\n\nreturn results;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        528,
+        48
+      ],
+      "id": "0018d5cb-4f82-4dc3-9d6e-6a26960e1388",
+      "name": "Filter text"
+    },
+    {
+      "parameters": {
+        "resource": "channel",
+        "operation": "replies",
+        "channelId": {
+          "__rl": true,
+          "value": "C076J8RCBK4",
+          "mode": "list",
+          "cachedResultName": "daily-standup"
+        },
+        "ts": "={{ $json.thread_ts }}",
+        "returnAll": true,
+        "filters": {
+          "latest": "={{ $now }}",
+          "oldest": "={{ $now.minus(24,\"hour\") }}"
+        }
+      },
+      "id": "b303b1b4-5c89-4fe2-bf26-9ad946395448",
+      "name": "Fetch Daily Messages1",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.4,
+      "position": [
+        32,
+        -64
+      ],
+      "webhookId": "8a206001-1b0c-4193-adc5-3be3640df4da",
+      "executeOnce": false,
+      "credentials": {
+        "slackApi": {
+          "id": "s4HKv8JbSd8O2TKx",
+          "name": "Slack Api"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "4e633035-0966-4753-a934-6870b04ac342",
+              "leftValue": "={{ $json.reply_count }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -192,
+        48
+      ],
+      "id": "d3d0ea38-ebf5-4c2e-80e0-529a394ab4bc",
+      "name": "If"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        272,
+        48
+      ],
+      "id": "785f266f-a287-4904-a353-5b6bb1870987",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "resource": "channel",
+        "operation": "member",
+        "channelId": {
+          "__rl": true,
+          "value": "C076J8RCBK4",
+          "mode": "list",
+          "cachedResultName": "daily-standup"
+        },
+        "returnAll": true
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.4,
+      "position": [
+        976,
+        48
+      ],
+      "id": "473f88d7-7aa8-4c5e-ae3e-d8b46dd6d4a8",
+      "name": "Get members of a channel",
+      "webhookId": "f60f5e31-ef55-4924-a592-35c6a40cfe62",
+      "executeOnce": true,
+      "credentials": {
+        "slackApi": {
+          "id": "s4HKv8JbSd8O2TKx",
+          "name": "Slack Api"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// List of user IDs you want to track\nconst trackedUserIds = [\n  \"U0766D9TWSF\",  // Yahya Rehman\n  \"U077NT392JZ\",  // Muhammad Abdullah\n  \"U08GSRF21RD\",  // Imran Farooq\n  \"U08LDDLN2LW\",  // Husnain Izhar\n  \"U0A60EPJC9K\",  // Awais Gillani\n  \"U0A61S7497G\",  // Aimen Aftab\n  \"U0A6QF7SCQK\",  // Abdul Wahab\n  \"U0A7074QFFY\",  // Nadir Khan\n  \"U0A7R01D9K9\",  // Aasfa alam\n  \"U0A9GD2KAKX\",   // Muhammad Ahmad\n   \"U0AUGPG3GNR\"   // AbdulAhad\n];\n\n// Helper function to convert full datetime to \"DD/MM/YYYY, hh:mm AM/PM\" format\nfunction convertToAMPMWithDate(dateTimeString) {\n  if (!dateTimeString) return null;\n  \n  // Split date and time\n  const datePart = dateTimeString.split(',')[0].trim();\n  const timePart = dateTimeString.split(',')[1].trim();\n  let [hours, minutes, seconds] = timePart.split(':');\n  \n  // Convert to 12-hour format\n  const hour = parseInt(hours);\n  const ampm = hour >= 12 ? 'PM' : 'AM';\n  const hour12 = hour % 12 || 12;\n  \n  return `${datePart}, ${hour12}:${minutes} ${ampm}`;\n}\n\n// Get the existing data from Group Messages by User node\nconst existingRecords = $('Group Messages by User').all();\n\n// Get user profiles from the previous node\nconst userProfiles = $input.all();\n\n// Create a map of user profiles by userId for easy lookup\nconst userProfileMap = new Map();\nfor (const profile of userProfiles) {\n  userProfileMap.set(profile.json.id, profile.json);\n}\n\n// Create a Set of existing userIds for quick lookup\nconst existingUserIds = new Set();\nfor (const record of existingRecords) {\n  existingUserIds.add(record.json.userId);\n}\n\n// Start with existing records (keeping the original structure with .json)\nlet result = [];\nfor (const record of existingRecords) {\n  const userProfile = userProfileMap.get(record.json.userId);\n  result.push({\n    ...record.json,\n    checkInTime: convertToAMPMWithDate(record.json.checkInTime),\n    checkOutTime: convertToAMPMWithDate(record.json.checkOutTime),\n    userName: userProfile ? (userProfile.real_name || userProfile.name) : \"Unknown User\",\n    userRealName: userProfile ? userProfile.real_name : null,\n    userDisplayName: userProfile?.profile?.display_name || null,\n    totalWorkingHours: record.json.totalWorkingHours || null,\n    totalBreakDuration: record.json.totalBreakDuration || null\n  });\n}\n\n// Add missing users with Absent status\nfor (const userId of trackedUserIds) {\n  if (!existingUserIds.has(userId)) {\n    const userProfile = userProfileMap.get(userId);\n    result.push({\n      userId: userId,\n      userName: userProfile ? (userProfile.real_name || userProfile.name) : \"Unknown User\",\n      userRealName: userProfile ? userProfile.real_name : null,\n      userDisplayName: userProfile?.profile?.display_name || null,\n      date: new Date().toLocaleDateString('en-GB'),\n      windowStart: null,\n      windowEnd: null,\n      checkInTime: null,\n      checkOutTime: null,\n      totalMessages: 0,\n      status: \"Absent\",\n      totalWorkingHours: null,\n      totalBreakDuration: null\n    });\n  }\n}\n\nreturn result;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1424,
+        48
+      ],
+      "id": "0aa5fafe-9407-4002-8ea1-2f9bdefa039f",
+      "name": "check for the absent and add username with ids"
+    },
+    {
+      "parameters": {
+        "operation": "delete",
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "C0ASZUWGEMP",
+          "mode": "list",
+          "cachedResultName": "daily-report"
+        },
+        "timestamp": 1776733225.100259
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.4,
+      "position": [
+        2816,
+        496
+      ],
+      "id": "a938793c-cb13-4aa4-8549-6507204429f4",
+      "name": "Delete a message",
+      "webhookId": "e27e55f7-4dcc-4e71-97b5-e8faca3c1153",
+      "credentials": {
+        "slackApi": {
+          "id": "s4HKv8JbSd8O2TKx",
+          "name": "Slack Api"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "channel",
+        "operation": "history",
+        "channelId": {
+          "__rl": true,
+          "value": "C0ASZUWGEMP",
+          "mode": "list",
+          "cachedResultName": "daily-report"
+        },
+        "limit": "={{ 1 }}",
+        "filters": {}
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.4,
+      "position": [
+        2512,
+        480
+      ],
+      "id": "ccbf543a-2b52-43b3-8a08-56f45dccab69",
+      "name": "Get the history of a channel",
+      "webhookId": "14d52b48-9162-497c-bb57-a1ad8a91fe29",
+      "credentials": {
+        "slackApi": {
+          "id": "s4HKv8JbSd8O2TKx",
+          "name": "Slack Api"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const results = [];\n\n// USER SHIFT CONFIG (USER ID BASED) \nconst userShifts = {\n  \"U0766D9TWSF\": { start: 17.5, end: 1 }, // Yahya Rehman (5:30 PM – 1 AM)\n  \"U077NT392JZ\": { start: 18, end: 1 },   // Muhammad Abdullah (6:00 PM – 1 AM)\n  \"U08GSRF21RD\": { start: 18, end: 1 },   // Imran Farooq (6:00 PM – 1 AM)\n  \"U08LDDLN2LW\": { start: 16, end: 1 },   // Husnain Izhar (4:00 PM – 1 AM)\n\n  \"U0A60EPJC9K\": { start: 14, end: 22 },  // Awais Gillani (2:00 PM – 10 PM)\n  \"U0A61S7497G\": { start: 14, end: 22 },  // Aimen Aftab (2:00 PM – 10 PM)\n\n  \"U0A6QF7SCQK\": { start: 19.5, end: 1 }, // Abdul Wahab (7:30 PM – 1 AM)\n  \"U0A7074QFFY\": { start: 17, end: 1 },   // Nadir Khan (5:00 PM – 1 AM)\n\n  \"U0A7R01D9K9\": { start: 13, end: 22 },  // Aasfa Alam (1:00 PM – 10 PM)\n\n  \"U0A9GD2KAKX\": { start: 16, end: 1 },   // Muhammad Ahmad Mamoon (4:00 PM – 1 AM)\n\n  \"U0AUGPG3GNR\": { start: 17, end: 1 },   // Abdul Ahad (5:00 PM – 1 AM)\n\n  // \"USER_ID_HAMZA\": { start: 16, end: 1 }, // M. Hamza Nawaz (4:00 PM – 1 AM)\n};\n\n// ================= MAIN LOOP =================\nfor (const item of $input.all()) {\n\n  const userName = item.json.userName;\n  const userId = item.json.userId;\n  const date = item.json.date;\n  const checkInTime = item.json.checkInTime;\n  const checkOutTime = item.json.checkOutTime;\n  const totalBreakDuration = item.json.totalBreakDuration;\n\n  let status = 'On Time';\n\n  // ===== TIME PARSER =====\n  const parseTime = (str) => {\n    if (!str) return null;\n    const [datePart, timePart] = str.split(', ');\n    const [day, month, year] = datePart.split('/');\n    return new Date(`${month}/${day}/${year}, ${timePart}`);\n  };\n\n  const toMinutes = (date) => date.getHours() * 60 + date.getMinutes();\n\n  const formatMinutes = (mins) => {\n    const h = Math.floor(mins / 60);\n    const m = mins % 60;\n    return `${h}h ${m}m`;\n  };\n\n  // ===== BREAK PARSER =====\n  const parseBreak = (str) => {\n    if (!str || str === '0h 0m') return 0;\n    const match = str.match(/(\\d+)h\\s*(\\d+)m/);\n    if (!match) return 0;\n    return parseInt(match[1]) * 60 + parseInt(match[2]);\n  };\n\n  // ===== STATUS LOGIC =====\n  if (!checkInTime) {\n\n    status = 'Absent';\n\n  } else {\n\n    const checkInDate = parseTime(checkInTime);\n    const checkInMinutes = toMinutes(checkInDate);\n\n    const shift = userShifts[userId];\n\n    // Default fallback shift = 1 PM\n    const shiftStartHour = shift ? shift.start : 13;\n\n    const lateThreshold = (shiftStartHour * 60) + 15;\n\n    if (checkInMinutes >= lateThreshold) {\n      status = 'Late';\n    }\n  }\n\n  // ===== BREAK + WORK HOURS =====\n  let breakDisplay;\n  let workHoursDisplay;\n\n  if (status === 'Absent') {\n\n    breakDisplay = '-';\n    workHoursDisplay = '-';\n\n  } else {\n\n    const breakMinutes = parseBreak(totalBreakDuration);\n\n    // ===== BREAK DISPLAY =====\n    if (!totalBreakDuration || breakMinutes === 0) {\n      breakDisplay = 'No Break';\n    } else {\n      breakDisplay = totalBreakDuration;\n    }\n\n    // ===== WORK HOURS =====\n    let totalMinutes = 0;\n\n    if (checkInTime) {\n\n      const checkInDate = parseTime(checkInTime);\n\n      let endTime;\n\n      if (!checkOutTime) {\n\n        endTime = new Date(checkInDate);\n\n        const shift = userShifts[userId];\n\n        if (shift) {\n\n          if (shift.end > shift.start) {\n            // Same day shift\n            endTime.setHours(shift.end, 0, 0, 0);\n          } else {\n            // Overnight shift\n            endTime.setDate(endTime.getDate() + 1);\n            endTime.setHours(shift.end, 0, 0, 0);\n          }\n\n        } else {\n          // fallback shift\n          endTime.setHours(22, 0, 0, 0);\n        }\n\n      } else {\n\n        endTime = parseTime(checkOutTime);\n\n        // Handle next-day checkout\n        if (endTime < checkInDate) {\n          endTime.setDate(endTime.getDate() + 1);\n        }\n      }\n\n      totalMinutes = Math.floor((endTime - checkInDate) / 60000);\n\n      // 🔥 SUBTRACT BREAK\n      totalMinutes = Math.max(0, totalMinutes - breakMinutes);\n\n      workHoursDisplay = formatMinutes(totalMinutes);\n\n    } else {\n      workHoursDisplay = '0h 0m';\n    }\n  }\n\n  // ===== FINAL OUTPUT =====\n  results.push({\n    json: {\n      Name: userName,\n      Date: date,\n      \"Check-In\": checkInTime || '-',\n      \"Check-Out\": checkInTime ? (checkOutTime ? checkOutTime : '(M)') : '-',\n      \"Work Hours\": workHoursDisplay,\n      Break: breakDisplay,\n      Status: status\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "6a7c9bca-0e71-43ab-8fc5-6232fa0222cf",
+      "name": "Shift assign and Calculate Status",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1648,
+        48
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Daily Report Schedule": {
+      "main": [
+        [
+          {
+            "node": "Mark as Daily Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Group Messages by User": {
+      "main": [
+        [
+          {
+            "node": "Get members of a channel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Convert to CSV": {
+      "main": [
+        [
+          {
+            "node": "Add Summary to CSV",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Daily Messages": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark as Daily Report": {
+      "main": [
+        [
+          {
+            "node": "Fetch Daily Messages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate Summary Statistics": {
+      "main": [
+        [
+          {
+            "node": "Split Data for CSV",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Add Summary to CSV": {
+      "main": [
+        [
+          {
+            "node": "Send Report to Slack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Data for CSV": {
+      "main": [
+        [
+          {
+            "node": "Convert to CSV",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get User Info": {
+      "main": [
+        [
+          {
+            "node": "check for the absent and add username with ids",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter text": {
+      "main": [
+        [
+          {
+            "node": "Group Messages by User",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Daily Messages1": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Fetch Daily Messages1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Filter text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get members of a channel": {
+      "main": [
+        [
+          {
+            "node": "Get User Info",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "check for the absent and add username with ids": {
+      "main": [
+        [
+          {
+            "node": "Shift assign and Calculate Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Shift assign and Calculate Status": {
+      "main": [
+        [
+          {
+            "node": "Calculate Summary Statistics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "3d5d1021-f835-49d7-a4c9-f42ddbf516bf",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "14a25d024c1565cfe1bcf30ba5b4eb223be398373f316fda5e3d6ec89f3d3640"
+  },
+  "id": "8ecy82es3Q2JtKxf",
+  "tags": []
+}
